@@ -9,10 +9,10 @@
 #     http://scrapy.readthedocs.org/en/latest/topics/downloader-middleware.html
 #     http://scrapy.readthedocs.org/en/latest/topics/spider-middleware.html
 
-BOT_NAME = 'unity3d_answers'
+BOT_NAME = 'u3d_spider'
 
-SPIDER_MODULES = ['unity3d_answers.spiders']
-NEWSPIDER_MODULE = 'unity3d_answers.spiders'
+SPIDER_MODULES = ['u3d_spider.spiders']
+NEWSPIDER_MODULE = 'u3d_spider.spiders'
 
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
@@ -55,9 +55,17 @@ COOKIES_ENABLED=True
 #DOWNLOADER_MIDDLEWARES = {
 #    'unity3d_answers.middlewares.MyCustomDownloaderMiddleware': 543,
 #}
+
+SPIDER_MIDDLEWARES = {
+    'scrapy_splash.SplashDeduplicateArgsMiddleware': 100,
+}
+
 DOWNLOADER_MIDDLEWARES = {
-    'scrapy.contrib.downloadermiddleware.useragent.UserAgentMiddleware' : None,
-    'unity3d_answers.middlewares.RotateUserAgentMiddleware' :400
+    'scrapy_splash.SplashCookiesMiddleware': 723,
+    'scrapy_splash.SplashMiddleware': 725,
+    'scrapy.downloadermiddlewares.httpcompression.HttpCompressionMiddleware': 810,
+    #'scrapy.contrib.downloadermiddleware.useragent.UserAgentMiddleware' : None,
+    'u3d_spider.middlewares.RotateUserAgentMiddleware' :400
 }
 
 # Enable or disable extensions
@@ -71,7 +79,8 @@ DOWNLOADER_MIDDLEWARES = {
 ITEM_PIPELINES = {
    # 'unity3d_answers.pipelines.DuplicatesPipeline': 300,
    # 'unity3d_answers.pipelines.JsonWriterPipeline': 500,
-    'unity3d_answers.pipelines.MySQLDBPipeline': 800
+   # 'u3d_spider.pipelines.Json4ESWriterPipeline':500,
+    'u3d_spider.pipelines.MySQLDBPipeline': 800
 
 
    # 'unity3d_answers.pipelines.MongoDBPipeline': 800
@@ -116,6 +125,16 @@ MYSQL_USER='root'
 MYSQL_PSW=''
 
 
+#queue order change 2 FIFO(BFO)
+DEPTH_PRIORITY = 1
+SCHEDULER_DISK_QUEUE = 'scrapy.squeue.PickleFifoDiskQueue'
+SCHEDULER_MEMORY_QUEUE = 'scrapy.squeue.FifoMemoryQueue'
+
 # Others
 DATE_FORMAT = "%b %d, %Y %I:%M:%S %p"
 START_DATE = "Jan 1, 2009 01:00:00 AM"
+
+#scrapy-splash
+SPLASH_URL = 'http://127.0.0.1:8050'
+DUPEFILTER_CLASS = 'scrapy_splash.SplashAwareDupeFilter'
+HTTPCACHE_STORAGE = 'scrapy_splash.SplashAwareFSCacheStorage'

@@ -13,6 +13,7 @@ from scrapy import log
 from scrapy.conf import settings
 from db_mysql.DBController import DBController
 
+from u3d_spider.spider_utilities import timestamp_datetime
 import time
 import os
 #from scrapy.exporters import JsonItemExporter
@@ -78,6 +79,75 @@ class JsonWriterPipeline(object):
         self.file.close()
 
 
+class Json4ESWriterPipeline(object):
+    def __init__(self):
+        import_date = timestamp_datetime((time.time()), "%Y%m%d%H%M%S")
+        file_path = 'ue_answers' + import_date + ".json"
+        self.json_file = open(file_path, 'a')
+        self.current_write_doc_id = 0
+
+    def process_item(self, item, spider):
+        if spider.name == "ue_answers_spider":
+            accept_answer_id = item['posts'][0]["accept_id"]
+            is_accepted = False  # 数据库中的IsAccepted不准（只起到is_answered作用）
+            if accept_answer_id and (
+            not accept_answer_id == "NULL"):  # !!Becareful!!!! u"NULL"  注意，使用NULL作为where条件会极大降低sql效率
+                is_accepted = True
+
+            tag_list = []
+            answer_list = []
+            for tag in item["tags"]:
+                tag_list.append(tag["tag"])
+
+            for i, post in enumerate(item["posts"]):
+                if i == 0:
+                    continue
+                answer_doc = {
+                    "is_accepted": is_accepted,
+                    "creation_time": post["creation_time"],
+                    "score": post['score'],
+                    "body": post['body']
+                }
+                answer_list.append(answer_doc)
+
+            # todo: comments
+            comment_list = []
+
+            # db_u3danswers中的replycount包含了comment，所以与answer count并不一定对应 len(answer_id_list)
+            doc = {
+                "question_id": item["discussion_id"],
+                "is_accepted": is_accepted,
+                "creation_time": item["posts"][0]["creation_time"],
+                "update_time": item["update_time"],
+                "score": item["posts"][0]["score"],
+                "view_count": item["view_count"],
+                "answer_count": len(answer_list),
+                "comment_count": 0,
+                "favorite_count": item["posts"][0]["following_count"],
+                "title": item["title"],
+                "body": item["posts"][0]["body"],
+                "source": "ueanswers",
+                "link": item["link"]
+            }
+
+            doc["answers"] = answer_list
+            doc["tags"] = tag_list
+            doc["tags_analyzer"] = tag_list
+
+            # print doc
+            action = {"index": {"_index": "spider_ue", "_type": "question_uedanswers", "_id": doc["question_id"]}}
+            self.json_file.write(json.dumps(dict(action))+"\n")
+            self.json_file.write(json.dumps(dict(doc))+"\n")
+            self.current_write_doc_id = self.current_write_doc_id + 1
+            if True:#self.current_write_doc_id %100 ==0:
+                self.json_file.flush()
+            #print line
+            item["other_info"]["writed2json"]="True"
+        return item
+
+    def close_spider(self, spider):
+        self.json_file.flush()
+        self.json_file.close()
 
 
 
@@ -158,14 +228,14 @@ class MySQLDBPipeline(object):
                 for post in item["posts"]:
                     #question
                     if post['post_type'] == "question":
-                        sql_update_question = "INSERT INTO tbl_u3danswers_post (Id, PostType, IsAccepted, AcceptAnswerId, UpdateTime, Score, AnswerCount, FollowingCount, Title, Body, Link) VALUES (%s, %s,%s, %s, %s, %s, %s, %s, %s, %s, %s)" \
+                        sql_update_question = "INSERT INTO tbl_u3danswers_post (Id, PostType, IsAccepted, AcceptAnswerId, UpdateTime, Score, AnswerCount, FollowingCount, Title, Body, Link, Imported) VALUES (%s, %s,%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" \
                           "ON DUPLICATE KEY UPDATE Id=VALUES(Id), PostType=VALUES(PostType), IsAccepted =VALUES(IsAccepted), AcceptAnswerId=VALUES(AcceptAnswerId), " \
                       "UpdateTime=VALUES(UpdateTime), Score=VALUES(Score), AnswerCount=VALUES(AnswerCount), FollowingCount=VALUES(FollowingCount), " \
-                      "Title=VALUES(Title), Body=VALUES(Body)"
+                      "Title=VALUES(Title), Body=VALUES(Body), Imported = VALUES(Imported)"
                         self.dbc.execute_SQL(sql_update_question,(post['post_id'], post['post_type'], "False" if post['accept_id'] =="NULL" else "True",
                                                                   post['accept_id'],
                                                                   post['update_time'], post['score'], item['reply_count'], post['following_count'],
-                                                                  item['title'], post['body'],item['link']))
+                                                                  item['title'], post['body'],item['link'], "False"))
                     #answer
                     else:
                         sql_update_question = "INSERT INTO tbl_u3danswers_post (Id, PostType, IsAccepted, Score, Title, Body, ParentId, Link) VALUES (%s, %s,%s, %s, %s, %s, %s, %s)" \
@@ -195,6 +265,75 @@ class MySQLDBPipeline(object):
 
             except Exception,e:
                 print e
+        elif spider.name == "ue_answers_spider":
+            if item['other_info']['process_type']=="Insert or Update":
+                self.insert_or_update_UE_questions(item)
+            elif item['other_info']['process_type']=="Fix or Update":
+                self.fix_or_update_UE_questions(item)
+
+            '''
+            try:
+                #1 更新post
+                for post in item["posts"]:
+                    #question
+                    if post['post_type'] == "question":
+
+                        # Tags
+                        tags=""
+                        for tag in item["tags"]:
+                            if tags=="":
+                                tags=tag["tag"]
+                            else:
+                                tags = tags+","+tag["tag"]
+                        # AnswersId
+                        answersId=""
+                        for asr in item["posts"]:
+                            if asr['post_type'] == "question":
+                                continue
+                            if answersId=="":
+                                answersId=asr["post_id"]
+                            else:
+                                answersId =answersId+","+asr["post_id"]
+
+                        sql_update_question = "INSERT INTO tbl_ueanswers_post (Id, PostType, IsAccepted, AcceptAnswerId, CreationTime, UpdateTime, Score, ViewCount, AnswerCount, FollowingCount, Title, Body, Link, Tags, AnswersId, IsStaff,Version, Section, Imported) VALUES (%s, %s,%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" \
+                          "ON DUPLICATE KEY UPDATE Id=VALUES(Id), PostType=VALUES(PostType), IsAccepted =VALUES(IsAccepted), AcceptAnswerId=VALUES(AcceptAnswerId), " \
+                      "UpdateTime=VALUES(UpdateTime), Score=VALUES(Score), AnswerCount=VALUES(AnswerCount), FollowingCount=VALUES(FollowingCount), " \
+                      "Title=VALUES(Title), Body=VALUES(Body),Tags=VALUES(Tags), AnswersId=VALUES(AnswersId), Imported = VALUES(Imported)"
+                        self.dbc.execute_SQL(sql_update_question,(post['post_id'], post['post_type'], "False" if post['accept_id'] =="NULL" else "True",
+                                                                  post['accept_id'], post['creation_time'],
+                                                                  post['update_time'], post['score'],item['view_count'], item['reply_count'], post['following_count'],
+                                                                  item['title'], post['body'],item['link'],tags, answersId, post['is_staff'] ,item['other_info']['version'],item['other_info']['section'],item['other_info']['imported']))
+                    #answer
+                    else:
+                        sql_update_question = "INSERT INTO tbl_ueanswers_post (Id, PostType, IsAccepted,CreationTime, Score, Title, Body, ParentId, Link, Tags, IsStaff) VALUES (%s,%s, %s,%s,%s, %s, %s, %s, %s, %s, %s)" \
+                                              "ON DUPLICATE KEY UPDATE Id=VALUES(Id), PostType=VALUES(PostType), IsAccepted =VALUES(IsAccepted)," \
+                                              "Score=VALUES(Score), " \
+                                              "Title=VALUES(Title), Body=VALUES(Body),IsStaff=VALUES(IsStaff)"
+                        self.dbc.execute_SQL(sql_update_question,(post['post_id'], post['post_type'], "False" if post['accept_id'] =="NULL" else "True",
+                                                                  post['creation_time'],post['score'],item['title'], post['body'],post['parent_id'], item['link'], tags,post['is_staff']))
+
+                #更新tag
+                        # 2. 更新tag
+                for tag in item['tags']:
+                    sql_update_tag = "INSERT INTO tbl_ueanswers_tag (Id, Name, Link) VALUES (%s, %s, %s)" \
+                                     "ON DUPLICATE KEY UPDATE Name=VALUES(Name)"
+                    self.dbc.execute_SQL(sql_update_tag, (tag['tag_id'], tag['tag'], tag['link']))
+
+                    # 3. 更新tag_question
+                    sql_find_tag_question = "SELECT * FROM tbl_ueanswers_post_tag WHERE PostId = %s AND TagId = %s"
+                    count = self.dbc.cursor.execute(sql_find_tag_question, (item['discussion_id'], tag['tag_id']))
+                    if count == 0:
+                        sql_insert_tag_question = "INSERT INTO tbl_ueanswers_post_tag VALUES(%s, %s)"
+                        self.dbc.execute_SQL(sql_insert_tag_question, (item['discussion_id'], tag['tag_id']))
+                        print "insert tag-question: question: " + item['discussion_id'] + " tag: " + tag['tag_id']
+                #更新state
+                self.dbc.execute_SQL("INSERT INTO tbl_ueanswers_spider_state (ScrapingTime, QuestionId, Link, QuestionUpdateTime, Finish) VALUES(%s, %s, %s, %s, %s)",
+                                        (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())),item['discussion_id'], item['link'], item['update_time'], 'False'))
+
+            except Exception,e:
+                print e
+            '''
+        '''
         elif spider.name == "question-list":
             #print item['question_id']+item['link']+ item['state']+ item['title']+ item['update_time']
             #1. 更新tbl_question
@@ -251,10 +390,105 @@ class MySQLDBPipeline(object):
 
             #不再return item，不再cmd显示，方便查看debug
             #return item
+        '''
 
     def close_spider(self, spider):
         #self.connection.close()
         self.dbc.stop()
+
+    def insert_or_update_UE_questions(self, item):
+        scraping_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
+        try:
+            # 1 更新post
+            for post in item["posts"]:
+                #for debug:
+                if not post['creation_time']:
+                    print "creation_time -,-"
+                # question
+                if post['post_type'] == "question":
+
+                    # Tags
+                    tags = ""
+                    for tag in item["tags"]:
+                        if tags == "":
+                            tags = tag["tag"]
+                        else:
+                            tags = tags + "," + tag["tag"]
+                    # AnswersId
+                    answersId = ""
+                    for asr in item["posts"]:
+                        if asr['post_type'] == "question":
+                            continue
+                        if answersId == "":
+                            answersId = asr["post_id"]
+                        else:
+                            answersId = answersId + "," + asr["post_id"]
+
+                    sql_update_question = "INSERT INTO tbl_ueanswers_post (Id, PostType, IsAccepted, AcceptAnswerId, CreationTime, UpdateTime, Score, ViewCount, AnswerCount, FollowingCount, Title, Body, Link, Tags, AnswersId, IsStaff,Version, Section,SectionLink, Imported, ScrapyTime) VALUES (%s, %s,%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s)" \
+                                          "ON DUPLICATE KEY UPDATE Id=VALUES(Id), PostType=VALUES(PostType), IsAccepted =VALUES(IsAccepted), AcceptAnswerId=VALUES(AcceptAnswerId), " \
+                                          "UpdateTime=VALUES(UpdateTime), Score=VALUES(Score), AnswerCount=VALUES(AnswerCount), FollowingCount=VALUES(FollowingCount), " \
+                                          "Title=VALUES(Title), Body=VALUES(Body),Tags=VALUES(Tags), AnswersId=VALUES(AnswersId), Imported = VALUES(Imported),ScrapyTime=VALUES(ScrapyTime)"
+                    self.dbc.execute_SQL(sql_update_question, (
+                    post['post_id'], post['post_type'], "False" if post['accept_id'] == "NULL" else "True",
+                    post['accept_id'], post['creation_time'],
+                    post['update_time'], post['score'], item['view_count'], item['reply_count'],
+                    post['following_count'],
+                    item['title'], post['body'], item['link'], tags, answersId, post['is_staff'],
+                    item['other_info']['version'], item['other_info']['section'],item['other_info']['section_link'], item['other_info']['imported'],scraping_time))
+                # answer
+                else:
+                    sql_update_question = "INSERT INTO tbl_ueanswers_post (Id, PostType, IsAccepted,CreationTime, Score, Title, Body, ParentId, Link, Tags, IsStaff, ScrapyTime) VALUES (%s,%s, %s,%s,%s, %s, %s, %s, %s, %s, %s,%s)" \
+                                          "ON DUPLICATE KEY UPDATE Id=VALUES(Id), PostType=VALUES(PostType), IsAccepted =VALUES(IsAccepted)," \
+                                          "Score=VALUES(Score), " \
+                                          "Title=VALUES(Title), Body=VALUES(Body),IsStaff=VALUES(IsStaff),ScrapyTime=VALUES(ScrapyTime)"
+                    self.dbc.execute_SQL(sql_update_question, (
+                    post['post_id'], post['post_type'], "False" if post['accept_id'] == "NULL" else "True",
+                    post['creation_time'], post['score'], item['title'], post['body'], post['parent_id'], item['link'],
+                    tags, post['is_staff'],scraping_time))
+
+                    # 更新tag
+                    # 2. 更新tag
+            for tag in item['tags']:
+                sql_update_tag = "INSERT INTO tbl_ueanswers_tag (Id, Name, Link) VALUES (%s, %s, %s)" \
+                                 "ON DUPLICATE KEY UPDATE Name=VALUES(Name)"
+                self.dbc.execute_SQL(sql_update_tag, (tag['tag_id'], tag['tag'], tag['link']))
+
+                # 3. 更新tag_question
+                sql_find_tag_question = "SELECT * FROM tbl_ueanswers_post_tag WHERE PostId = %s AND TagId = %s"
+                count = self.dbc.cursor.execute(sql_find_tag_question, (item['discussion_id'], tag['tag_id']))
+                if count == 0:
+                    sql_insert_tag_question = "INSERT INTO tbl_ueanswers_post_tag VALUES(%s, %s)"
+                    self.dbc.execute_SQL(sql_insert_tag_question, (item['discussion_id'], tag['tag_id']))
+                    print "insert tag-question: question: " + item['discussion_id'] + " tag: " + tag['tag_id']
+            # 更新state
+            self.dbc.execute_SQL(
+                "INSERT INTO tbl_ueanswers_spider_state (ScrapingTime, QuestionId, Link, QuestionUpdateTime, Finish,ProcessType) VALUES(%s, %s, %s, %s, %s, %s)",
+                (scraping_time, item['discussion_id'], item['link'],
+                 item['update_time'], 'False',"Insert or Update"))
+
+        except Exception, e:
+            print e
+
+    def fix_or_update_UE_questions(self, item):
+        scraping_time=time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
+
+        value_list=[]
+        sql_update_set=""
+        for (k,v) in item['other_info']['summury_info'].items():
+            sql_update_set = sql_update_set + str(k) +" =  %s,"
+            value_list.append(v)
+
+
+        sql_str="UPDATE tbl_ueanswers_post SET "+sql_update_set+" ScrapyTime =%s WHERE Id = %s"
+        value_list.append(scraping_time)
+        value_list.append(item['discussion_id'])
+        self.dbc.execute_SQL(sql_str, (tuple(value_list)))
+        # 更新state
+        self.dbc.execute_SQL(
+            "INSERT INTO tbl_ueanswers_spider_state (ScrapingTime, QuestionId, Link, QuestionUpdateTime, Finish, ProcessType) VALUES(%s, %s, %s, %s, %s, %s)",
+            (scraping_time, item['discussion_id'], item['link'],
+             item['update_time'], 'False', "Fix or Update"))
+
 
 
 '''

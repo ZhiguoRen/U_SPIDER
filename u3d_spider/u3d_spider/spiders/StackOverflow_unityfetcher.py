@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 
 from stackapi import StackAPI
-from spider_utilities import store_json
-from spider_utilities import load_json
-from spider_utilities import datetime_timestamp
-from db_mysql.DBController import DBController
-from spider_utilities import timestamp_datetime
+from u3d_spider.spider_utilities import store_json
+from u3d_spider.spider_utilities import load_json
+from u3d_spider.spider_utilities import datetime_timestamp
+from u3d_spider.db_mysql.DBController import DBController
+from u3d_spider.spider_utilities import timestamp_datetime
 from collections import deque
 import json
 
@@ -15,7 +15,7 @@ g_dbc = DBController(host='localhost', db_user_name='root', psd='',
 g_stack_filter='!WzMsMbzXivo6ssptMFZ0P(hrbEKf0WqvhAlWAgX'
 
 
-can_stop_when_find_fetched=True
+can_stop_when_find_fetched=False
 
 g_file_fix_path="tempStackFetchingState4Fix.json"
 g_fix_info=True
@@ -117,8 +117,10 @@ def fetch_questions():
             #compare last_activity with the db
             if not need_fetch(post_item['question_id'], post_item['last_activity_date']):
                 found_fetched_question = True
+                print "pass this question"
                 continue
             write_item_2db(post_item,"question")
+            print "write 2 db"
 
         has_more=questions["has_more"]
         #store state2json
@@ -140,7 +142,7 @@ def fetch_questions():
         else:
             print "new page" + str(questions["page"]-1)
         print "page:" + str(questions["page"]-1)
-        fetching_page = int(questions["page"]-1)
+        fetching_page = int(questions["page"])
 
 
 
@@ -164,21 +166,18 @@ def write_item_2db(post_item,post_type):
     if post_type == "answer":
         id=post_item['answer_id']
 
-    sql_update_post = "INSERT INTO tbl_stack_post (Id, PostType, CreationTime, UpdateTime, Score, CommentCount, Title, Body) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)" \
+    sql_update_post = "INSERT INTO tbl_stack_post (Id, PostType, CreationTime, UpdateTime, Score, CommentCount, Title, Body, Imported) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)" \
                           "ON DUPLICATE KEY UPDATE Id=VALUES(Id), PostType=VALUES(PostType), CreationTime=VALUES(CreationTime), " \
                       "UpdateTime=VALUES(UpdateTime), Score=VALUES(Score), CommentCount=VALUES(CommentCount), " \
-                      "Title=VALUES(Title), Body=VALUES(Body)"
-    g_dbc.cursor.execute(sql_update_post,(id,post_type,creation_date,last_activity_date,score,comment_count,title,body))
-    g_dbc.conn.commit()
-
+                      "Title=VALUES(Title), Body=VALUES(Body), Imported=VALUES(Imported)"
+    g_dbc.execute_SQL(sql_update_post,(id,post_type,creation_date,last_activity_date,score,comment_count,title,body,"False"))
 
 
     #special for answer and question
     if post_type == "answer":
         is_accepted = str(post_item['is_accepted'])
         sql_update_answer_post="UPDATE tbl_stack_post SET IsAccepted = %s, ParentId = %s WHERE Id = %s"
-        g_dbc.cursor.execute(sql_update_answer_post, (is_accepted, question_id, id))
-        g_dbc.conn.commit()
+        g_dbc.execute_SQL(sql_update_answer_post, (is_accepted, question_id, id))
 
     elif post_type == "question":
         view_count= post_item['view_count']
@@ -190,8 +189,8 @@ def write_item_2db(post_item,post_type):
             tag_id = tag
             sql_update_tag = "INSERT INTO tbl_stack_tag (Id, Name) VALUES (%s, %s)" \
                              "ON DUPLICATE KEY UPDATE Name=VALUES(Name)"
-            g_dbc.cursor.execute(sql_update_tag, (tag_id, tag_name))
-            g_dbc.conn.commit()
+            g_dbc.execute_SQL(sql_update_tag, (tag_id, tag_name))
+
             # tag_question
             sql_find_tag_question = "SELECT * FROM tbl_stack_post_tag WHERE PostId = %s AND TagId = %s"
             count = g_dbc.cursor.execute(sql_find_tag_question, (question_id, tag_id))
@@ -216,8 +215,8 @@ def write_item_2db(post_item,post_type):
         #if is_answered == "True": #is_answered和存在accepted answer并不相同
         if 'accepted_answer_id' in post_item.keys():
             accepted_answer_id = post_item['accepted_answer_id']
-            g_dbc.cursor.execute("UPDATE tbl_stack_post SET AcceptAnswerId= %s WHERE Id= %s",(accepted_answer_id,id))
-            g_dbc.conn.commit()
+            g_dbc.execute_SQL("UPDATE tbl_stack_post SET AcceptAnswerId= %s WHERE Id= %s",(accepted_answer_id,id))
+
 
     # comments
     if comment_count>0:
@@ -230,8 +229,8 @@ def write_item_2db(post_item,post_type):
             score = comment['score']
             sql_update_comment = "INSERT INTO tbl_stack_comment (Id, PostId, PostType, Score, Text, CreationTime) VALUES (%s, %s, %s, %s, %s, %s)" \
                              "ON DUPLICATE KEY UPDATE Id=VALUES(Id), PostId=VALUES(PostId), PostType=VALUES(PostType), Score=VALUES(Score), Text=VALUES(Text), CreationTime=VALUES(CreationTime)"
-            g_dbc.cursor.execute(sql_update_comment, (comment_id, post_id, post_type, score, body, creation_date))
-            g_dbc.conn.commit()
+            g_dbc.execute_SQL(sql_update_comment, (comment_id, post_id, post_type, score, body, creation_date))
+
 
 
 
@@ -296,4 +295,6 @@ def fetch_comments():
     foo=""
 
 #fetch_questions()
-fetch_questions_fix_info()
+if __name__=="__main__":
+    #fetch_questions_fix_info()
+    fetch_questions()

@@ -122,7 +122,7 @@ class U3dForumSpider(scrapy.Spider):
         super(U3dForumSpider, self).__init__(*a, **kw)
         self.start_url_index = g_start_url_index
         #self.finish_crawl = g_finish_crwal
-        self.finish_crawl = False
+        self.finish_crawl = {"base_tag":False}
         self.dbc = DBController(host=settings['MYSQL_SERVER'],
                                 db_user_name=settings['MYSQL_USER'],
                                 psd=settings['MYSQL_PSW'],
@@ -147,19 +147,23 @@ class U3dForumSpider(scrapy.Spider):
         self.start_url_index = self.start_url_index + 1
         if self.start_url_index < len(g_start_url_list):
             print "request next start URL:" + g_start_url_list[self.start_url_index]
-            return Request(g_start_url_list[self.start_url_index], cookies=self.cookies, headers=self.headers)
+            return Request(g_start_url_list[self.start_url_index], cookies=self.cookies, headers=self.headers , priority=-1)
 
         else:
             print "finished; start_url_index: " + str(self.start_url_index)
-            self.finish_crawl = True
+            self.finish_crawl[base_tag] = True
 
     def parse(self, response):  #负责生成翻页request，生成item request, 记录title中的概括信息
-        if self.finish_crawl:
-            print "u3dforum_spider finish crwal"
-            return
+
 
         url = response.url
         base_tag = url.split('/')[-2].split('.')[-2]
+        if base_tag not in self.finish_crawl.keys():
+            self.finish_crawl[base_tag]=False
+
+        if self.finish_crawl[base_tag]:
+            print "u3dforum_spider finish crwal in base_tag: " + base_tag
+            #return
 
             # 保存当前页面in db_state
         if g_update_state_db:
@@ -169,24 +173,15 @@ class U3dForumSpider(scrapy.Spider):
             base_tag, response.url, "NULL", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())), "False"))
             self.dbc.conn.commit()
 
-        # 因为request队列后进先出，因此此处应先放置index request
-        nav_list = response.css('.pageNavLinkGroup.afterDiscussionListHandle .PageNav nav>.text')
-        next_page = None
-        for navnum in nav_list:
-            if navnum.css('a::text').extract_first() == 'Next >':
-                next_page = navnum.css('a::attr(href)').extract_first()
 
-        if (next_page is not None):
-            print "generate next page request: "+response.urljoin(next_page)
-            yield scrapy.Request(response.urljoin(next_page), callback=self.parse, cookies=self.cookies,
-                                 headers=self.headers)
-        else:
-            yield self.request_next_start_url(base_tag)
-            print "cannot find next page, current page:"+response.url
 
 
         #生成条目的request
         discussion_list = response.css('.discussionListItem')
+
+        #使用priority控制顺序
+        cur_priority = len(discussion_list)
+
         #skipNextPage = False
         for discussion in discussion_list:
             item = DiscussionItem()
@@ -232,7 +227,8 @@ class U3dForumSpider(scrapy.Spider):
                 if last_update_time >= int(update_time):
                     print "discussion not updated: "+item['discussion_id']
                     if (not is_sticky) and (not g_force_crawl):
-                        yield self.request_next_start_url(base_tag)
+                        #yield self.request_next_start_url(base_tag)
+                        self.finish_crawl[base_tag]=True
                         print "switch 2 next url"
                         break
                     if (not g_force_update):
@@ -261,7 +257,29 @@ class U3dForumSpider(scrapy.Spider):
 
             item['posts']=[]
             #生成request来爬取question内容
-            yield scrapy.Request(item['link'], meta={'item':item}, callback=self.parse_discussion,cookies = self.cookies,headers=self.headers)
+            yield scrapy.Request(item['link'], meta={'item':item}, callback=self.parse_discussion,cookies = self.cookies,headers=self.headers, priority=cur_priority)
+            cur_priority=cur_priority-1
+
+        # 因为request队列后进先出，因此此处应先放置index request
+        # 已在配置中修改为先进先出队列
+        # 使用priority控制顺序
+        if not self.finish_crawl[base_tag]:
+            nav_list = response.css('.pageNavLinkGroup.afterDiscussionListHandle .PageNav nav>.text')
+            next_page = None
+            for navnum in nav_list:
+                if navnum.css('a::text').extract_first() == 'Next >':
+                    next_page = navnum.css('a::attr(href)').extract_first()
+
+            if (next_page is not None):
+                print "generate next page request: " + response.urljoin(next_page)
+                yield scrapy.Request(response.urljoin(next_page), callback=self.parse, cookies=self.cookies,
+                                     headers=self.headers, priority=-1)
+            else:
+                yield self.request_next_start_url(base_tag)
+                print "cannot find next page, current page:" + response.url
+        else:
+            # self.finish_crawl=False
+            yield self.request_next_start_url(base_tag)
 
 
     def parse_discussion(self, response):
@@ -297,7 +315,7 @@ class U3dForumSpider(scrapy.Spider):
                 if navnum.css('a::text').extract_first() == 'Next >':
                     next_page = navnum.css('a::attr(href)').extract_first()
         if next_page:
-            yield scrapy.Request(response.urljoin(next_page), meta={'item': discussion_item}, callback=self.parse_discussion)
+            yield scrapy.Request(response.urljoin(next_page), meta={'item': discussion_item}, callback=self.parse_discussion, priority=100)
         else:
             yield discussion_item
 

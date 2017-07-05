@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
-# 弃用
-# v2: incremental = True存在错误
+
+#v3: 需要利用db中的Imported字段
+
 
 #import json
 from u3d_spider.db_mysql.DBController import DBController
 from u3d_spider.spider_utilities import store_json_with_list,timestamp_datetime
+from elasticsearch import Elasticsearch
+
 import time
 
+
+g_fetch_comments=False
 
 g_file_path="DBdata_u3danswers"
 g_dbc=DBController(host='localhost', db_user_name='root', psd='',
@@ -50,41 +55,36 @@ def fetch_answer(accept_answer_id,tbl_name,comment_tbl_name1,comment_tbl_name2,i
         "body": answer_db[4]
     }
     answer_comment_list = []
-    if answer_db[5] > 0:
+    if g_fetch_comments and answer_db[5] > 0:
         fetch_all_comments(accept_answer_id, answer_comment_list,comment_tbl_name1,comment_tbl_name2)
     answer_doc["comments"] = answer_comment_list
     return answer_doc
 
 
 
-def transdata(tbl_dict, file_path,incremental):
+def transdata(tbl_dict, file_path):
 
-    #doc_list=[]
-    s_field="1"
-    s_value=1
-    if incremental:
-        s_field = "Imported"
-        s_value = "False"
+    try:
+        es = Elasticsearch()
+    except Exception,e:
+        print "es open error"
+        return
 
-    row=g_dbc.execute_SQL("SELECT COUNT(1) FROM "+ tbl_dict["tbl_qa"] +" WHERE "+s_field+" = %s", s_value)
-    if row<0:
-        print "Exception: count"
-    data_count=g_dbc.cursor.fetchone()[0]
-
-    cur_loop_start_index=0
     fetch_step=1000
 
-    index_for_print=0
-    while cur_loop_start_index<data_count:
-        doc_list=[]
-        if cur_loop_start_index+fetch_step>=data_count:
-            fetch_step = data_count-cur_loop_start_index
+    sql_str = "SELECT Id, IsAccepted, AcceptAnswerId, CreationTime, UpdateTime, Score, ViewCount, AnswerCount, CommentCount, " + \
+              tbl_dict["ff_count"] + ", Title, Body, Tags, AnswersId, Link FROM " + tbl_dict[
+                  "tbl_qa"] + " WHERE Imported='False' ORDER BY Id LIMIT %s "
+    row = g_dbc.execute_SQL(sql_str, fetch_step)
 
-        sql_str="SELECT Id, IsAccepted, AcceptAnswerId, CreationTime, UpdateTime, Score, ViewCount, AnswerCount, CommentCount, "+tbl_dict["ff_count"] +", Title, Body, Tags, AnswersId, Link FROM "+tbl_dict["tbl_qa"]+" WHERE "+s_field +" = %s ORDER BY Id LIMIT %s,%s "
-        row = g_dbc.execute_SQL(sql_str,(s_value, (cur_loop_start_index-1) if cur_loop_start_index>0 else 0, fetch_step)) #Be care start_index are excluded, thus need -1 here
-        if row<=0:
-            print "Exception: row == 0"
-            break
+    index_for_print=0
+    while row > 0:
+        doc_list=[]
+        #sql_str="SELECT Id, IsAccepted, AcceptAnswerId, CreationTime, UpdateTime, Score, ViewCount, AnswerCount, CommentCount, "+tbl_dict["ff_count"] +", Title, Body, Tags, AnswersId, Link FROM "+tbl_dict["tbl_qa"]+" WHERE "+s_field +" = %s ORDER BY Id LIMIT %s,%s "
+        #row = g_dbc.execute_SQL(sql_str,(s_value, (cur_loop_start_index-1) if cur_loop_start_index>0 else 0, fetch_step)) #Be care start_index are excluded, thus need -1 here
+        #if row<=0:
+        #    print "Exception: row == 0"
+        #    break
 
         data_list= g_dbc.cursor.fetchall()
         for data in data_list:
@@ -118,10 +118,10 @@ def transdata(tbl_dict, file_path,incremental):
                 "link":data[14]
             }
             doc["tags"]=tag_list
-
+            doc["tags_analyzer"] = tag_list
             #comments
-            if(doc["comment_count"]>0):
-                fetch_all_comments(doc["question_id"], comment_list)
+            if(g_fetch_comments and doc["comment_count"]>0):
+                fetch_all_comments(doc["question_id"], comment_list,tbl_dict["tbl_comment_post"],tbl_dict["tbl_comment"])
             doc["comments"]=comment_list
 
 
@@ -147,14 +147,22 @@ def transdata(tbl_dict, file_path,incremental):
             #print doc
             print index_for_print
             index_for_print=index_for_print+1
-            action = {"index": {"_index": "spider_qa", "_type": tbl_dict["es_type"], "_id":doc["question_id"] }}
+            action = {"index": {"_index":tbl_dict['es_index'], "_type": tbl_dict["es_type"], "_id":doc["question_id"] }}
             doc_list.append(action)
             doc_list.append(doc)
             g_dbc.execute_SQL("UPDATE "+ tbl_dict["tbl_post"] +" SET Imported = %s WHERE Id = %s",("True",doc["question_id"]))
+            #add: store doc 2 es
+            res = es.index(index=tbl_dict['es_index'], doc_type=tbl_dict["es_type"], id=doc["question_id"], body=doc)
+            print(res['created'])
 
+        #changed: deprecated not write 2 json now
+        #store_json_with_list(file_path,doc_list,"a")
+        sql_str = "SELECT Id, IsAccepted, AcceptAnswerId, CreationTime, UpdateTime, Score, ViewCount, AnswerCount, CommentCount, " + \
+                  tbl_dict["ff_count"] + ", Title, Body, Tags, AnswersId, Link FROM " + tbl_dict[
+                      "tbl_qa"] + " WHERE Imported='False' ORDER BY Id LIMIT %s "
+        row = g_dbc.execute_SQL(sql_str, fetch_step)
+    print "complete"
 
-        store_json_with_list(file_path,doc_list,"a")
-        cur_loop_start_index=cur_loop_start_index+fetch_step
 
 
 if __name__=='__main__':
@@ -163,10 +171,23 @@ if __name__=='__main__':
                            "tbl_comment_post": "view_u3danswers_post_comments",
                            "tbl_comment": "tbl_u3danswers_comment",
                            "ff_count":"FollowingCount",
+                           "es_index":"spider_u3d_answers",
                            "es_type": "question_u3danswers",
                            "source":"u3danswers"}
+
+    tbl_u3dstack_dict ={"tbl_qa": "view_stack_qa",
+                     "tbl_post": "tbl_stack_post",
+                           "tbl_comment_post": "view_stack_post_comments",
+                           "tbl_comment": "tbl_stack_comment",
+                           "ff_count":"FavoriteCount",
+                           "es_index":"spider_u3d_stack",
+                           "es_type": "question_u3dstack",
+                           "source":"u3dstack"
+    }
     import_date = timestamp_datetime((time.time()),"%Y%m%d%H%M%S")
-    g_file_path = g_file_path+import_date+".json"
-    transdata(tbl_u3danswers_dict,g_file_path,incremental=False) #incremental = True存在逻辑错误
+
+
+    g_file_path = g_file_path+import_date+tbl_u3danswers_dict["es_index"]+".json"
+    transdata(tbl_u3danswers_dict,g_file_path)
 
 

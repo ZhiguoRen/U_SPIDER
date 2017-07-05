@@ -71,9 +71,12 @@ class DiscussionItem(scrapy.Item):
     update_time = scrapy.Field()
     reply_count = scrapy.Field()
     view_count = scrapy.Field()
+    score=scrapy.Field()
     tags = scrapy.Field()  # 包含所有Tag
     posts = scrapy.Field() #包含所有Post
     state = scrapy.Field()
+    other_info=scrapy.Field()
+
 
 class PostItem(scrapy.Item):
     post_id = scrapy.Field()
@@ -90,3 +93,5 @@ class PostItem(scrapy.Item):
     score = scrapy.Field()
     following_count = scrapy.Field()
     accept_id=scrapy.Field()
+    other_info=scrapy.Field()
+

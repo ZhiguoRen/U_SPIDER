@@ -1,25 +1,26 @@
 # -*- coding: utf-8 -*-
 import scrapy
-#from unity3d_answers.items import QuestionListItem, QuestionTag
-from ..db_mysql.DBController import DBController
-from ..items import QuestionItem,ContentItem,CommentItem,TagItem ,PostItem, DiscussionItem
 
-from spider_utilities import timestamp_datetime,datetime_timestamp
+from ..db_mysql.DBController import DBController
+from ..items import TagItem, PostItem, DiscussionItem
+
+from ..spider_utilities import timestamp_datetime,datetime_timestamp
 
 from scrapy.conf import settings
-from datetime import datetime
 import time
 
 
-g_update_state_db = True
+g_update_state_db = True #记录爬取状态
 g_force_crawl = True    #强制继续crwal， if发现未update问题
-g_force_update = False  #强制写db， if发现未update问题
+g_force_update = True  #强制写db
+g_stop_time = datetime_timestamp("2016-01-01", "%Y-%m-%d")
+g_stop_num_threshhold = 15 #当发现多余threshhold个未更新的问题时，停止crawl(多线程原因)
 
 class U3dAnswersSpider(scrapy.Spider):
     name = "u3danswers_spider"
     allowed_domains = ["answers.unity3d.com"]
     # 如爬取中断，查看log并修改这里的page id重新下载
-    start_urls = [ "http://answers.unity3d.com/index.html?page=312&pageSize=30&sort=active&customPageSize=true&filters=all"]
+    start_urls = [ "http://answers.unity3d.com/index.html?page=1160&pageSize=30&sort=active&customPageSize=true&filters=all"]
 
 
 
@@ -27,6 +28,7 @@ class U3dAnswersSpider(scrapy.Spider):
     def __init__(self, *a, **kw):
         super(U3dAnswersSpider, self).__init__(*a, **kw)
         self.finish_crawl=False
+        #self.s_factor=100
         self.dbc = DBController(host=settings['MYSQL_SERVER'],
                                 db_user_name=settings['MYSQL_USER'],
                                 psd=settings['MYSQL_PSW'],
@@ -36,7 +38,7 @@ class U3dAnswersSpider(scrapy.Spider):
     def parse(self, response):   #负责生成翻页request，生成question_item request, 记录question_title中的概括信息
         if self.finish_crawl:
             print "u3danswers_spider finish crawl"
-            return
+            yield
 
         url = response.url
 
@@ -45,18 +47,14 @@ class U3dAnswersSpider(scrapy.Spider):
             sql_update_state_db = "INSERT INTO tbl_u3danswers_spider_state (ScrapingTime, QuestionId, Link, QuestionUpdateTime, Finish) VALUES (%s, %s, %s, %s, %s)"
             self.dbc.execute_SQL(sql_update_state_db, (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())),"NULL",url,"NULL","False"))
 
-        #生成下一页的request
-        next_page = response.css('.pagination .next a::attr(href)').extract_first()
-        # if (not self.check_last_update_date or self.last_update_date is None or page_end_date >= self.last_update_date) and (next_page is not None):
-        if (next_page is not None):
-            print "next page request"
-            yield scrapy.Request(response.urljoin(next_page), callback=self.parse)
-        else:
-            print "cannot  next pagefind，current page: "+ response.url
 
+
+        found_questions_num=0
 
         question_list = response.css('.question-list-item')
+        cur_priority = len(question_list) * 20 #+ self.s_factor
         for question in question_list:
+
             #item = QuestionItem()
             item = DiscussionItem()
             item['link'] = response.urljoin(question.css('.title a::attr(href)').extract_first())
@@ -79,15 +77,25 @@ class U3dAnswersSpider(scrapy.Spider):
                 print "state: accepted"
                 item['state'] = 'Accepted'
 
+            if not g_force_crawl:
+                #判断日期是否可以结束
+                if update_time<=g_stop_time:
+                    print "can stop: update_time:"+str(update_time)+"   older then stop_time:"+str(g_stop_time)
+                    self.finish_crawl = True
+                    break
+
+
             # 判断更新日期，若未更新，则pass
             sql_find_update_time="SELECT UpdateTime FROM tbl_u3danswers_post WHERE Id = %s"
-            row_count=self.dbc.cursor.execute(sql_find_update_time,item['discussion_id'])
+            row_count=self.dbc.execute_SQL(sql_find_update_time,item['discussion_id'])
             if row_count > 0:
                 last_update_time = self.dbc.cursor.fetchone()[0]
                 last_update_time = datetime_timestamp(last_update_time)
                 if last_update_time >= update_time:
                     print "question not updated: "+item['discussion_id']
-                    if not g_force_crawl:
+                    found_questions_num = found_questions_num+1
+                    print "found question not updated num: "+ str(found_questions_num)
+                    if not g_force_crawl and (found_questions_num>g_stop_num_threshhold):
                         print "finish_crawl"
                         self.finish_crawl=True
                         break
@@ -107,7 +115,19 @@ class U3dAnswersSpider(scrapy.Spider):
                 item['tags'].append(dict(tag_item))
             #yield item
             #生成request来爬取question内容
-            yield scrapy.Request(response.urljoin(item['link']), meta={'item':item}, callback=self.parse_question)
+            yield scrapy.Request(response.urljoin(item['link']), meta={'item':item}, callback=self.parse_question,priority=cur_priority)
+            cur_priority=cur_priority-10
+
+        #生成下一页的request
+        if not self.finish_crawl: #不再继续翻页
+            next_page = response.css('.pagination .next a::attr(href)').extract_first()
+            # if (not self.check_last_update_date or self.last_update_date is None or page_end_date >= self.last_update_date) and (next_page is not None):
+            if (next_page is not None):
+                print "next page request"
+                #self.s_factor=self.s_factor-len(question_list)
+                yield scrapy.Request(response.urljoin(next_page), callback=self.parse, priority=-1)
+            else:
+                print "cannot  next pagefind，current page: "+ response.url
 
 
     def parse_question(self,response):
@@ -140,7 +160,7 @@ class U3dAnswersSpider(scrapy.Spider):
             asr_post["parent_id"] = item["discussion_id"]
             asr_post["body"] = answer.css(".answer-body").extract_first()
             asr_post["score"] = answer.css('.score ::text').extract_first()
-            if not answer.css(".label-success").extract_first():
+            if answer.css(".label-success").extract_first():  #Fixed： 之前版本此处判断刚好相反，导致db中该位置为错
                 asr_post["accept_id"] = asr_post["post_id"]
                 item['posts'][0]["accept_id"] = asr_post["post_id"]
             else:
@@ -159,7 +179,7 @@ class U3dAnswersSpider(scrapy.Spider):
         # 下一页，返回request，并且传递item
         next_page=response.css(".pagination .next a::attr(href)").extract_first()
         if next_page:
-            yield scrapy.Request(response.urljoin(next_page), meta={'item':item}, callback=self.parse_question)
+            yield scrapy.Request(response.urljoin(next_page), meta={'item':item}, callback=self.parse_question,priority=1000)
         else:
             #print item
             yield item
